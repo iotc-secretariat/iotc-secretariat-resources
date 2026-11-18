@@ -1,0 +1,281 @@
+---
+title: "A worked example of an IOTC working paper written in Quarto"
+bibliography: references.bib
+format:
+  iotc-wp-docx: default
+  iotc-wp-html: default
+editor: source
+---
+
+```{r setup}
+#| include: false
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+
+theme_set(theme_minimal())
+```
+
+::: {custom-style="Author and revision"}
+Firstname Lastname^1^, Secondauthor Name^2^
+:::
+
+::: {custom-style="Document reference"}
+^1^ Institute One, City, Country · ^2^ Institute Two, City, Country
+:::
+
+**Purpose, expectation and action intended**
+
+*Discussions (for information and open discussion)*
+
+The paper presents [a short description of what the paper shows], and invites
+discussion of [the point you want the meeting to discuss], as set out in Section 3.
+
+*Feedback (to collect input and suggestions)*
+
+The paper is to request review and comments on [the methodological choice you
+want feedback on], as set out in Section 2.
+
+*Recommendation (to ask the meeting to endorse a recommendation)*
+
+The paper is to seek endorsement of [what you want endorsed], as set out in
+Section 4.
+
+<!-- Keep only the headings above that apply to your paper and delete the rest. -->
+
+{{< pagebreak >}}
+
+# Abstract {.unnumbered}
+
+Write 200--300 words here covering: the fishery or dataset, the period covered,
+the method used, the main quantitative result, and the caveat a reader should
+carry away. The abstract sits on its own page because of the page break above,
+so the body of the paper starts cleanly on page 2.
+
+**Keywords:** keyword one, keyword two, keyword three
+
+# Introduction
+
+Describe the fishery, the management context, and the question the paper
+addresses. Cite the literature in the usual way [@maunder2004]; multiple
+citations work too [@maunder2004; @thorson2015].
+
+This template uses **simulated data**, generated in the chunk below, so that it
+renders anywhere without a database connection. Replace that chunk with your own
+data loading step.
+
+```{r simulate-data}
+#| include: false
+
+set.seed(42)
+
+years <- 2005:2025
+
+catch_data <- expand_grid(
+  year = years,
+  quarter = 1:4,
+  vessel = paste0("V", sprintf("%02d", 1:12))
+) |>
+  mutate(
+    hooks = round(rnorm(n(), mean = 1450, sd = 90)),
+    # a gentle increase after 2018, plus seasonal and vessel effects
+    mu = 60 *
+      exp(0.045 * pmax(year - 2018, 0)) *
+      c(1.0, 0.75, 1.05, 1.30)[quarter] *
+      rep(runif(12, 0.8, 1.2), length.out = n()),
+    catch_kg = rgamma(n(), shape = 2, scale = mu / 2) * hooks / 1000,
+    cpue = catch_kg / hooks * 1000
+  )
+
+annual <- catch_data |>
+  group_by(year) |>
+  summarise(
+    n_sets = n(),
+    n_vessels = n_distinct(vessel),
+    hooks_million = sum(hooks) / 1e6,
+    catch_t = sum(catch_kg) / 1000,
+    cpue = sum(catch_kg) / sum(hooks) * 1000,
+    .groups = "drop"
+  )
+```
+
+# Materials and methods
+
+## Data available
+
+Describe the data source, the spatial and temporal resolution, and any filtering.
+A summary table of the dataset by year is given in @tbl-fishery-summary.
+
+Note the `col.names` argument: without it the table shows raw column names such
+as `hooks_million`, which reads poorly in a submitted paper.
+
+```{r}
+#| label: tbl-fishery-summary
+#| tbl-cap: "Annual summary of the simulated fishery, including the number of fishing sets, active vessels, hooks deployed, total catch, and nominal CPUE."
+
+kable(
+  annual,
+  digits = c(0, 0, 0, 2, 1, 1),
+  format.args = list(big.mark = ","),
+  col.names = c(
+    "Year", "Sets", "Vessels", "Hooks (million)",
+    "Catch (t)", "Nominal CPUE (kg/1000 hooks)"
+  )
+)
+```
+
+## Statistical model
+
+State the model formally. Equations use standard LaTeX:
+
+$$
+\eta_i = \text{Year}_i + \text{Quarter}_i + s(\text{Vessel}_i)
+$$
+
+where $s()$ denotes a smooth function estimated from the data.
+
+### Caching slow model fits
+
+Model fits on large datasets can take minutes. Caching them to an `.rds` file
+keeps re-renders fast, while a stored row count guards against silently reusing
+a fit made on different data.
+
+```{r fit-model}
+#| include: false
+
+rerun_models <- FALSE   # set TRUE to refit instead of using the cache
+
+dir.create("outputs/model_cache", recursive = TRUE, showWarnings = FALSE)
+cache_file <- "outputs/model_cache/example_model.rds"
+
+if (rerun_models || !file.exists(cache_file)) {
+
+  message("Fitting model...")
+
+  m <- lm(log(cpue) ~ factor(year) + factor(quarter), data = catch_data)
+
+  saveRDS(list(m = m, n_obs = nrow(catch_data)), cache_file)
+
+} else {
+
+  message("Loading cached model...")
+
+  cached <- readRDS(cache_file)
+
+  if (!identical(cached$n_obs, nrow(catch_data))) {
+    stop(
+      "Cached model was fitted on ", cached$n_obs, " rows but the data now has ",
+      nrow(catch_data), ". Set rerun_models <- TRUE to refit."
+    )
+  }
+
+  m <- cached$m
+}
+```
+
+```{r derive-index}
+#| include: false
+
+index <- annual |>
+  mutate(nominal_index = cpue / cpue[year == min(year)])
+
+std <- tibble(
+  year = years,
+  standardized_index = exp(c(0, coef(m)[grepl("^factor\\(year\\)", names(coef(m)))]))
+) |>
+  mutate(standardized_index = standardized_index / standardized_index[1])
+
+index <- left_join(index, std, by = "year")
+
+# Values quoted in the text: compute them, never type them by hand
+results <- list(
+  final_index      = round(index$standardized_index[index$year == 2025], 2),
+  increase_pct     = round((index$standardized_index[index$year == 2025] - 1) * 100),
+  correlation      = round(cor(index$nominal_index, index$standardized_index), 3)
+)
+```
+
+# Results
+
+## Trends in the index
+
+Nominal and standardized indices are compared in @fig-index. The standardized
+index reached `r results$final_index` in 2025, an increase of about
+`r results$increase_pct`% relative to 2005, and the two series were closely
+correlated (r = `r results$correlation`).
+
+Writing those numbers as inline code rather than typing them means the text can
+never disagree with the figures.
+
+```{r}
+#| label: fig-index
+#| fig-cap: "Nominal and standardized annual CPUE indices from the simulated fishery, each expressed relative to 2005 (=1). The standardized series removes the modelled seasonal and vessel effects."
+#| fig-width: 6.5
+#| fig-height: 4
+
+index |>
+  select(year, Nominal = nominal_index, Standardized = standardized_index) |>
+  pivot_longer(-year, names_to = "series", values_to = "index") |>
+  ggplot(aes(year, index, colour = series)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.8) +
+  labs(x = "Year", y = "Relative index", colour = NULL)
+```
+
+## Seasonal pattern
+
+@fig-quarter shows the quarterly pattern. Note that this figure and the one
+above each live in their own chunk: a chunk that emits a figure *and* a table
+loses its caption, so keep one output per labelled chunk.
+
+```{r}
+#| label: fig-quarter
+#| fig-cap: "Distribution of nominal CPUE by quarter across all years, shown as boxplots. The horizontal line marks the median and the box spans the interquartile range."
+#| fig-width: 6.5
+#| fig-height: 3.5
+
+ggplot(catch_data, aes(factor(quarter), cpue)) +
+  geom_boxplot(outlier.alpha = 0.15) +
+  labs(x = "Quarter", y = "CPUE (kg / 1000 hooks)")
+```
+
+# Discussion
+
+Interpret the results, state the limitations honestly, and set out what further
+work would resolve them.
+
+# Conclusion
+
+Summarise in a short paragraph what the paper establishes and what it recommends.
+
+# Supplementary information
+
+Model summaries belong here rather than in the body. They render as aligned
+monospace text because the reference document defines a `SourceCode` style.
+
+```{r}
+#| echo: false
+
+summary(m)$coefficients |>
+  head(8) |>
+  round(4)
+```
+
+The full index values are given in @tbl-index.
+
+```{r}
+#| label: tbl-index
+#| tbl-cap: "Nominal and standardized annual indices, expressed relative to 2005."
+
+kable(
+  index |> select(year, nominal_index, standardized_index),
+  digits = 3,
+  col.names = c("Year", "Nominal index", "Standardized index")
+)
+```
+
+# References
+
+::: {#refs}
+:::
